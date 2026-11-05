@@ -7,7 +7,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_PREFIX: ghcr.io/evolution-foundation
+  IMAGE_PREFIX: ghcr.io/marcelogorutuba
 
 jobs:
   build-and-push:
