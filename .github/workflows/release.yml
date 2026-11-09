@@ -7,7 +7,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_PREFIX: ghcr.io/marcelogorutuba
+  IMAGE_PREFIX: ghcr.io/marcelogorutuba/release-lab-stack # LAB (official: ghcr.io/evolution-foundation)
 
 jobs:
   build-and-push:
@@ -41,7 +41,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
+          submodules: false # LAB (official: recursive)
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -60,8 +60,9 @@ jobs:
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
-          context: ${{ matrix.context }}
-          file: ${{ matrix.dockerfile }}
+          context: ./lab/fake # LAB (official: ${{ matrix.context }})
+          file: ./lab/fake/Dockerfile # LAB (official: ${{ matrix.dockerfile }})
+          build-args: LAB_RUN=${{ github.run_id }} # LAB
           push: true
           tags: |
             ${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:${{ steps.version.outputs.version }}
