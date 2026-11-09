@@ -1,78 +1,27 @@
+# Umbrella release: tag + GitHub Release only. The images are published by each
+# family repo; nothing is built here and no registry tag moves.
+#
+#   push release/X.Y  -> next RC tag (vX.Y.Z-rc.N) + prerelease
+#   push main (merge of release/X.Y, tree equal to its last RC)
+#                     -> vX.Y.Z + final release
+#   any other push on main -> nothing
 name: Release
 
 on:
   push:
-    tags:
-      - "v*.*.*"
+    branches: [main, "release/**"]
 
-env:
-  REGISTRY: ghcr.io
-  IMAGE_PREFIX: ghcr.io/evolution-foundation
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  build-and-push:
-    name: Build & Push ${{ matrix.service }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      packages: write
-    strategy:
-      matrix:
-        include:
-          - service: evo-auth-service-community
-            context: ./evo-auth-service-community
-            dockerfile: ./evo-auth-service-community/Dockerfile
-          - service: evo-ai-crm-community
-            context: ./evo-ai-crm-community
-            dockerfile: ./evo-ai-crm-community/docker/Dockerfile
-          - service: evo-ai-frontend-community
-            context: ./evo-ai-frontend-community
-            dockerfile: ./evo-ai-frontend-community/Dockerfile
-          - service: evo-ai-processor-community
-            context: ./evo-ai-processor-community
-            dockerfile: ./evo-ai-processor-community/Dockerfile
-          - service: evo-ai-core-service-community
-            context: ./evo-ai-core-service-community
-            dockerfile: ./evo-ai-core-service-community/Dockerfile
-          - service: evo-flow-community
-            context: ./evo-flow-community
-            dockerfile: ./evo-flow-community/Dockerfile
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract version from tag
-        id: version
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: ${{ matrix.context }}
-          file: ${{ matrix.dockerfile }}
-          push: true
-          tags: |
-            ${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:${{ steps.version.outputs.version }}
-            ${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-  create-release:
-    name: Create GitHub Release
-    needs: build-and-push
-    runs-on: ubuntu-latest
+  release:
+    name: Tag and GitHub Release
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
@@ -80,28 +29,75 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Compute Docker tag (strip leading 'v' to match what the per-service workflows publish)
-        id: dockertag
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - name: Resolve
+        id: r
+        env:
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          git fetch --force --tags --quiet
+          mode=skip version=''
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
-          body: |
-            ## Docker Images
+          if [[ "$REF" == refs/heads/release/* ]]; then
+            line=${REF_NAME#release/}
+            [[ "$line" =~ ^[0-9]+\.[0-9]+$ ]] || { echo "::error::release branches must be named release/X.Y, got $REF_NAME"; exit 1; }
+            existing=$(git tag --points-at HEAD --list "v$line.*-rc.*" | sort -V | tail -1)
+            if [ -n "$existing" ]; then
+              echo "$existing already points at this commit: nothing to do."
+            else
+              last_final=$(git tag --list "v$line.*" | grep -v -- '-rc\.' | sort -V | tail -1 || true)
+              if [ -n "$last_final" ]; then base="$line.$(( ${last_final##*.} + 1 ))"; else base="$line.0"; fi
+              last_rc=$(git tag --list "v$base-rc.*" | sed 's/.*-rc\.//' | sort -n | tail -1)
+              version="v$base-rc.$(( ${last_rc:-0} + 1 ))"
+              mode=rc
+            fi
 
-            All images are available on Docker Hub under the `evoapicloud` org. The Docker tag drops the leading `v` (so the git tag `${{ github.ref_name }}` corresponds to the Docker tag `${{ steps.dockertag.outputs.version }}`):
+          elif [ "$REF" = refs/heads/main ]; then
+            merged=$(git rev-parse -q --verify HEAD^2 || true)
+            branch=""
+            if [ -n "$merged" ]; then
+              branch=$(git branch -r --contains "$merged" --format='%(refname:short)' | grep '^origin/release/' | sort -V | tail -1 || true)
+            fi
+            if [ -z "$branch" ]; then
+              echo "Push on main is not a merge of a release branch: nothing to release."
+            else
+              line=${branch#origin/release/}
+              rc=$(git tag --list "v$line.*-rc.*" | sort -V | tail -1)
+              [ -n "$rc" ] || { echo "::error::$branch was merged but has no RC tag"; exit 1; }
+              if [ "$(git rev-parse "$rc^{tree}")" != "$(git rev-parse 'HEAD^{tree}')" ]; then
+                echo "::error::main does not match the last RC ($rc). Refusing to release."
+                exit 1
+              fi
+              version=${rc%-rc.*}
+              if git rev-parse -q --verify "refs/tags/$version" >/dev/null; then
+                echo "::error::$version already exists"; exit 1
+              fi
+              mode=promote
+            fi
 
-            ```bash
-            docker pull evoapicloud/evo-auth-service-community:${{ steps.dockertag.outputs.version }}
-            docker pull evoapicloud/evo-ai-crm-community:${{ steps.dockertag.outputs.version }}
-            docker pull evoapicloud/evo-ai-frontend-community:${{ steps.dockertag.outputs.version }}
-            docker pull evoapicloud/evo-ai-processor-community:${{ steps.dockertag.outputs.version }}
-            docker pull evoapicloud/evo-ai-core-service-community:${{ steps.dockertag.outputs.version }}
-            docker pull evoapicloud/evo-flow-community:${{ steps.dockertag.outputs.version }}
-            docker pull evoapicloud/evo-bot-runtime:${{ steps.dockertag.outputs.version }}
-            docker pull evoapicloud/evo-crm-gateway:${{ steps.dockertag.outputs.version }}
-            ```
+          else
+            echo "::error::Unsupported ref $REF"; exit 1
+          fi
 
-            Or, equivalently, `:latest` always tracks the most recent tagged release.
+          notes_start=$(git tag --list 'v*' | grep -v -- '-rc' | sort -V | tail -1 || true)
+          { echo "mode=$mode"; echo "version=$version"; echo "notes_start=$notes_start"; } >> "$GITHUB_OUTPUT"
+          echo "mode=$mode version=$version"
+
+      - name: Create tag and release
+        if: steps.r.outputs.mode != 'skip'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.r.outputs.version }}
+          MODE: ${{ steps.r.outputs.mode }}
+          NOTES_START: ${{ steps.r.outputs.notes_start }}
+        run: |
+          set -euo pipefail
+          if [ "$MODE" = promote ]; then kind=(--latest); else kind=(--prerelease --latest=false); fi
+          start=(); [ -n "$NOTES_START" ] && start=(--notes-start-tag "$NOTES_START")
+          {
+            echo "Each submodule is pinned to the release branch of its repo:"
+            git submodule status | awk '{s = $1; sub(/^[-+U]/, "", s); print "- " $2 " @ " substr(s, 1, 7)}'
+          } > /tmp/notes.md
+          gh release create "$VERSION" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "$VERSION" --notes-file /tmp/notes.md --generate-notes "${start[@]}" "${kind[@]}"
