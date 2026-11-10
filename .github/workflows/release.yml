@@ -96,7 +96,7 @@ jobs:
           if [ "$MODE" = promote ]; then kind=(--latest); else kind=(--prerelease --latest=false); fi
           start=(); [ -n "$NOTES_START" ] && start=(--notes-start-tag "$NOTES_START")
           {
-            echo "Each submodule is pinned to the release branch of its repo:"
+            echo "Submodules in this release (the cut pins the family ones to their release branch):"
             git submodule status | awk '{s = $1; sub(/^[-+U]/, "", s); print "- " $2 " @ " substr(s, 1, 7)}'
           } > /tmp/notes.md
           gh release create "$VERSION" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
